@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Карта ям (фильтрованные данные)</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        font-family: Arial, sans-serif;
+      }
+      #map {
+        height: 600px;
+        width: 100%;
+      }
+      .info-panel {
+        position: absolute;
+        bottom: 20px;
+        right: 20px;
+        background: white;
+        padding: 12px 18px;
+        border-radius: 8px;
+        z-index: 1000;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.2);
+        font-size: 14px;
+        min-width: 220px;
+        pointer-events: auto;
+      }
+      .legend span {
+        display: inline-block;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        margin-right: 5px;
+        vertical-align: middle;
+      }
+      .legend-item {
+        margin-bottom: 4px;
+      }
+      select,
+      button {
+        margin-top: 8px;
+        padding: 5px;
+        width: 100%;
+        border-radius: 4px;
+        border: 1px solid #ccc;
+      }
+      button {
+        background: #4caf50;
+        color: white;
+        border: none;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #45a049;
+      }
+      .nav-buttons {
+        display: flex;
+        gap: 8px;
+        margin: 8px 0;
+      }
+      .nav-buttons button {
+        margin: 0;
+      }
+      .status {
+        font-size: 12px;
+        color: #666;
+        margin-top: 5px;
+        text-align: center;
+      }
+      .pothole-info {
+        font-size: 12px;
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid #eee;
+      }
+      .layer-switch {
+        display: flex;
+        gap: 8px;
+        margin-top: 8px;
+      }
+      .layer-switch button {
+        margin: 0;
+        background: #2196f3;
+      }
+      .layer-switch button.active {
+        background: #0b7dda;
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <div class="info-panel">
+      <div class="legend">
+        <div class="legend-item">
+          <span style="background: #ff0000"></span> Глубокая (&gt;1.5g)
+        </div>
+        <div class="legend-item">
+          <span style="background: #ff8800"></span> Средняя (1.0–1.5g)
+        </div>
+        <div class="legend-item">
+          <span style="background: #ffff00"></span> Мелкая (&lt;1.0g)
+        </div>
+      </div>
+      <select id="potholeSelect">
+        <option value="">-- Выберите яму --</option>
+      </select>
+      <div class="nav-buttons">
+        <button id="prevBtn" disabled>◀ Предыдущая</button>
+        <button id="nextBtn" disabled>Следующая ▶</button>
+      </div>
+      <div class="layer-switch">
+        <button id="streetsBtn" class="active">Схема</button>
+        <button id="satelliteBtn">Спутник</button>
+      </div>
+      <button id="refreshBtn">🔄 Обновить данные</button>
+      <div id="status" class="status"></div>
+      <div id="potholeInfo" class="pothole-info"></div>
+    </div>
+
+    <script>
+      // ===== ЗАМЕНИТЕ НА ВАШУ CSV-ССЫЛКУ (из отфильтрованной таблицы) =====
+      const CSV_URL =
+        "https://docs.google.com/spreadsheets/d/e/2PACX-1vQumVZq6E3N4z3gBose1SjKZ5Pj89o_oPMMsQb3phHicohd0iaGK3ntE7wCQ10pIIeW3ex9gdkhRR4o/pub?gid=0&single=true&output=csv";
+
+      let map;
+      let markersLayer = L.layerGroup();
+      let potholes = [];
+      let markers = [];
+      let currentIndex = -1;
+
+      // --- Слои карты ---
+      const osmLayer = L.tileLayer(
+        "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png",
+        {
+          attribution:
+            '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; CartoDB',
+        },
+      );
+      const satelliteLayer = L.tileLayer(
+        "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        {
+          attribution: "&copy; Esri",
+        },
+      );
+
+      map = L.map("map").setView([54.735, 55.959], 13);
+      osmLayer.addTo(map);
+      markersLayer.addTo(map);
+
+      // --- Переключение слоёв ---
+      document.getElementById("streetsBtn").addEventListener("click", () => {
+        map.removeLayer(satelliteLayer);
+        map.addLayer(osmLayer);
+        document.getElementById("streetsBtn").classList.add("active");
+        document.getElementById("satelliteBtn").classList.remove("active");
+      });
+      document.getElementById("satelliteBtn").addEventListener("click", () => {
+        map.removeLayer(osmLayer);
+        map.addLayer(satelliteLayer);
+        document.getElementById("satelliteBtn").classList.add("active");
+        document.getElementById("streetsBtn").classList.remove("active");
+      });
+
+      // --- Вспомогательные функции UI ---
+      function updateSelectAndButtons() {
+        const select = document.getElementById("potholeSelect");
+        select.innerHTML = '<option value="">-- Выберите яму --</option>';
+        potholes.forEach((p, idx) => {
+          const opt = document.createElement("option");
+          opt.value = idx;
+          opt.textContent = `Яма #${idx + 1} - ${p.impact.toFixed(2)}g`;
+          select.appendChild(opt);
+        });
+        select.onchange = (e) => {
+          if (e.target.value !== "") goToPothole(parseInt(e.target.value));
+        };
+        const prevBtn = document.getElementById("prevBtn");
+        const nextBtn = document.getElementById("nextBtn");
+        prevBtn.disabled = potholes.length === 0 || currentIndex <= 0;
+        nextBtn.disabled =
+          potholes.length === 0 || currentIndex >= potholes.length - 1;
+        prevBtn.onclick = () => {
+          if (currentIndex > 0) goToPothole(currentIndex - 1);
+        };
+        nextBtn.onclick = () => {
+          if (currentIndex < potholes.length - 1) goToPothole(currentIndex + 1);
+        };
+      }
+
+      function goToPothole(idx) {
+        if (idx < 0 || idx >= potholes.length) return;
+        currentIndex = idx;
+        const p = potholes[currentIndex];
+        map.setView([p.lat, p.lon], 16);
+        markers[currentIndex].openPopup();
+        document.getElementById("potholeInfo").innerHTML = `
+              <b>📍 Яма #${currentIndex + 1}</b><br>
+              💥 Сила удара: ${p.impact.toFixed(2)}g<br>
+              📍 ${p.lat.toFixed(6)}, ${p.lon.toFixed(6)}<br>
+              📊 Всего ям: ${potholes.length}
+          `;
+        updateSelectAndButtons();
+      }
+
+      function addMarkersToMap() {
+        markersLayer.clearLayers();
+        markers = [];
+        potholes.forEach((p, idx) => {
+          let color;
+          if (p.impact > 1.5) color = "#ff0000";
+          else if (p.impact > 1.0) color = "#ff8800";
+          else color = "#ffff00";
+          const marker = L.circleMarker([p.lat, p.lon], {
+            radius: 8,
+            color: color,
+            fillOpacity: 0.8,
+            weight: 1,
+          }).bindPopup(`
+                  <b>Яма #${idx + 1}</b><br>
+                  💥 Сила удара: <b>${p.impact.toFixed(2)}g</b><br>
+                  📍 ${p.lat.toFixed(6)}, ${p.lon.toFixed(6)}
+              `);
+          marker.on("click", () => goToPothole(idx));
+          marker.addTo(markersLayer);
+          markers.push(marker);
+        });
+      }
+
+      // --- Загрузка данных из CSV (Google Sheets) ---
+      async function loadData() {
+        const statusDiv = document.getElementById("status");
+        statusDiv.textContent = "Загрузка данных...";
+        try {
+          const response = await fetch(CSV_URL);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const csvText = await response.text();
+          Papa.parse(csvText, {
+            header: true,
+            skipEmptyLines: true,
+            complete: (results) => {
+              const data = results.data;
+              const newPotholes = [];
+              for (const row of data) {
+                const lat = parseFloat(row.Lat);
+                const lon = parseFloat(row.Lon);
+                const impact = parseFloat(row.Impact);
+                if (isNaN(lat) || isNaN(lon) || isNaN(impact)) continue;
+                newPotholes.push({ lat, lon, impact });
+              }
+              // если есть поле Time – сортируем по времени
+              if (data[0] && data[0].Time) {
+                newPotholes.sort((a, b) => (a.time || 0) - (b.time || 0));
+              }
+              potholes = newPotholes;
+              addMarkersToMap();
+              currentIndex = potholes.length > 0 ? 0 : -1;
+              updateSelectAndButtons();
+              if (potholes.length > 0) goToPothole(0);
+              statusDiv.textContent = `✅ Загружено ${potholes.length} ям`;
+            },
+            error: (err) => {
+              console.error(err);
+              statusDiv.textContent = "❌ Ошибка парсинга CSV";
+            },
+          });
+        } catch (err) {
+          console.error(err);
+          statusDiv.textContent =
+            "❌ Ошибка загрузки. Проверьте CSV-ссылку и интернет.";
+        }
+      }
+
+      document.getElementById("refreshBtn").addEventListener("click", loadData);
+      loadData();
+    </script>
+  </body>
+</html>
