@@ -1,0 +1,224 @@
+
+const TRAM_FILE_ID = '1bUVsLNXnKbl-b8qcVo6KnU6fCPdVpqgA'; 
+
+const TARGET_SHEET_ID = '1-HQ3fd0zrZ1HmWvvOBmT4s6ddCPqbmctX5p_f4DUnGc'; 
+
+const TARGET_SHEET_NAME = 'FilteredPotholes'; 
+
+const FILTER_CONFIG = {
+    IMPACT_THRESHOLD: 1.2,      
+    CLUSTER_RADIUS_METERS: 20, 
+    TRAM_BUFFER_METERS: 10     
+};
+
+function filterAndSavePotholes() {
+    const startTime = new Date();
+    try {
+      
+        const csvUrl = "https://docs.google.com/spreadsheets/d/e/2PACX-1vQumVZq6E3N4z3gBose1SjKZ5Pj89o_oPMMsQb3phHicohd0iaGK3ntE7wCQ10pIIeW3ex9gdkhRR4o/pub?output=csv";
+        const response = UrlFetchApp.fetch(csvUrl);
+        const csvData = Utilities.parseCsv(response.getContentText());
+        if (csvData.length < 2) { Logger.log("Нет данных в исходной CSV."); return; }
+
+      
+        const headers = csvData[0];
+        const getIndex = (name) => headers.indexOf(name);
+        const idxTime = getIndex("Time");
+        const idxLat = getIndex("Lat");
+        const idxLon = getIndex("Lon");
+        const idxImpact = getIndex("Impact");
+        const idxCount = getIndex("Count");
+        const idxSat = getIndex("Satelites");
+
+        const events = [];
+        for (let i = 1; i < csvData.length; i++) {
+            const row = csvData[i];
+            if (row.length <= Math.max(idxLat, idxLon, idxImpact)) continue;
+            const lat = parseFloat(row[idxLat]);
+            const lon = parseFloat(row[idxLon]);
+            const impact = parseFloat(row[idxImpact]);
+            if (isNaN(lat) || isNaN(lon) || isNaN(impact)) continue;
+            events.push({
+                time: idxTime >= 0 ? parseFloat(row[idxTime]) : null,
+                lat: lat, lon: lon, impact: impact,
+                count: idxCount >= 0 ? (row[idxCount] ? parseFloat(row[idxCount]) : null) : null,
+                sat: idxSat >= 0 ? (row[idxSat] || "") : ""
+            });
+        }
+        if (events.length === 0) { Logger.log("Нет корректных событий в исходной таблице."); return; }
+
+        
+        Logger.log("Загрузка трамвайных путей с Google Drive...");
+        const tramLines = loadTramLinesFromDrive();
+        if (tramLines === null) {
+            Logger.log("Не удалось загрузить трамвайные пути.");
+            return;
+        }
+
+    
+        const filteredByTram = [];
+        let nearTramCount = 0;
+        for (let ev of events) {
+            const minDist = minDistanceToTram(ev.lat, ev.lon, tramLines);
+            if (minDist > FILTER_CONFIG.TRAM_BUFFER_METERS) {
+                filteredByTram.push(ev);
+            } else {
+                nearTramCount++;
+            }
+        }
+        Logger.log(`Отфильтровано по трамвайным путям: ${nearTramCount} событий (ближе ${FILTER_CONFIG.TRAM_BUFFER_METERS} м)`);
+
+        
+        const clusterSizes = performClustering(filteredByTram);
+        const finalEvents = [];
+        let manholeCount = 0;
+        for (let i = 0; i < filteredByTram.length; i++) {
+            const ev = filteredByTram[i];
+            const isSingle = clusterSizes[i] === 1;
+            const isLowImpact = ev.impact < FILTER_CONFIG.IMPACT_THRESHOLD;
+            if (!(isSingle && isLowImpact)) {
+                finalEvents.push(ev);
+            } else {
+                manholeCount++;
+            }
+        }
+        Logger.log(`Отфильтровано колодцев: ${manholeCount} событий (одиночные, Impact < ${FILTER_CONFIG.IMPACT_THRESHOLD})`);
+        Logger.log(`Итоговое количество ям: ${finalEvents.length}`);
+
+      
+        finalEvents.sort((a,b) => (a.time || 0) - (b.time || 0));
+        const targetSheet = getOrCreateSheet(TARGET_SHEET_ID, TARGET_SHEET_NAME);
+        targetSheet.clear();
+        const outputHeaders = ["Time", "Lat", "Lon", "Impact", "Count", "Satelites"];
+        targetSheet.getRange(1, 1, 1, outputHeaders.length).setValues([outputHeaders]);
+        const outputData = finalEvents.map(ev => [
+            ev.time !== null ? ev.time : "",
+            ev.lat, ev.lon, ev.impact,
+            ev.count !== null ? ev.count : "",
+            ev.sat
+        ]);
+        if (outputData.length) {
+            targetSheet.getRange(2, 1, outputData.length, outputHeaders.length).setValues(outputData);
+        }
+        Logger.log(`Готово! Время выполнения: ${(new Date() - startTime)/1000} сек.`);
+    } catch (error) {
+        Logger.log(`Критическая ошибка: ${error.message}\n${error.stack}`);
+    }
+}
+
+
+function createTimeDrivenTriggers() {
+  
+    const triggers = ScriptApp.getProjectTriggers();
+    for (const trigger of triggers) {
+        if (trigger.getHandlerFunction() === 'filterAndSavePotholes') {
+            ScriptApp.deleteTrigger(trigger);
+        }
+    }
+    
+    ScriptApp.newTrigger('filterAndSavePotholes')
+        .timeBased()
+        .everyMinutes(2)  
+        .create();
+    Logger.log(' Триггер создан! Скрипт будет запускаться каждую минуту.');
+}
+
+
+function loadTramLinesFromDrive() {
+    try {
+        const file = DriveApp.getFileById(TRAM_FILE_ID);
+        const blob = file.getBlob();
+        const fileContent = blob.getDataAsString();
+        const geojson = JSON.parse(fileContent);
+        const lines = [];
+        geojson.features.forEach(feature => {
+            if (feature.geometry && feature.geometry.type === "LineString") {
+                const coords = feature.geometry.coordinates;
+                if (coords && coords.length >= 2) {
+                    lines.push(coords);
+                }
+            }
+        });
+        Logger.log(`Загружено трамвайных линий: ${lines.length}`);
+        return lines;
+    } catch (error) {
+        Logger.log(`Ошибка при загрузке файла с Google Drive: ${error.message}`);
+        return null;
+    }
+}
+
+function getOrCreateSheet(spreadsheetId, sheetName) {
+    const ss = SpreadsheetApp.openById(spreadsheetId);
+    let sheet = ss.getSheetByName(sheetName);
+    if (!sheet) sheet = ss.insertSheet(sheetName);
+    return sheet;
+}
+
+function haversine(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
+    const phi1 = lat1 * Math.PI / 180;
+    const phi2 = lat2 * Math.PI / 180;
+    const dphi = (lat2 - lat1) * Math.PI / 180;
+    const dlam = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dphi/2)**2 + Math.cos(phi1)*Math.cos(phi2)*Math.sin(dlam/2)**2;
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    return R * c;
+}
+
+function pointToSegmentDistance(lat, lon, p1, p2) {
+    const x = lon, y = lat;
+    const x1 = p1[0], y1 = p1[1];
+    const x2 = p2[0], y2 = p2[1];
+    const dx = x2 - x1, dy = y2 - y1;
+    const t = ((x - x1) * dx + (y - y1) * dy) / (dx*dx + dy*dy);
+    let projX, projY;
+    if (t <= 0) { projX = x1; projY = y1; }
+    else if (t >= 1) { projX = x2; projY = y2; }
+    else { projX = x1 + t * dx; projY = y1 + t * dy; }
+    const dx_deg = (x - projX) * 111300 * Math.cos(y * Math.PI/180);
+    const dy_deg = (y - projY) * 111300;
+    return Math.sqrt(dx_deg*dx_deg + dy_deg*dy_deg);
+}
+
+function minDistanceToTram(lat, lon, lines) {
+    if (!lines || lines.length === 0) return Infinity;
+    let minDist = Infinity;
+    for (const line of lines) {
+        for (let i = 0; i < line.length - 1; i++) {
+            const d = pointToSegmentDistance(lat, lon, line[i], line[i+1]);
+            if (d < minDist) minDist = d;
+            if (minDist <= FILTER_CONFIG.TRAM_BUFFER_METERS) return minDist;
+        }
+    }
+    return minDist;
+}
+
+function performClustering(events) {
+    const n = events.length;
+    if (n === 0) return [];
+    const distMatrix = Array(n).fill().map(() => Array(n).fill(0));
+    for (let i = 0; i < n; i++) {
+        for (let j = i+1; j < n; j++) {
+            const d = haversine(events[i].lat, events[i].lon, events[j].lat, events[j].lon);
+            distMatrix[i][j] = d;
+            distMatrix[j][i] = d;
+        }
+    }
+    const used = new Array(n).fill(false);
+    const clusterSizes = new Array(n).fill(0);
+    for (let i = 0; i < n; i++) {
+        if (used[i]) continue;
+        const cluster = [i];
+        used[i] = true;
+        for (let j = i+1; j < n; j++) {
+            if (used[j]) continue;
+            if (distMatrix[i][j] <= FILTER_CONFIG.CLUSTER_RADIUS_METERS) {
+                cluster.push(j);
+                used[j] = true;
+            }
+        }
+        const size = cluster.length;
+        cluster.forEach(idx => { clusterSizes[idx] = size; });
+    }
+    return clusterSizes;
+}
