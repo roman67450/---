@@ -126,9 +126,9 @@
     </div>
 
     <script>
-      // ===== ЗАМЕНИТЕ НА ВАШУ CSV-ССЫЛКУ (из отфильтрованной таблицы) =====
+  
       const CSV_URL =
-        "https://docs.google.com/spreadsheets/d/e/2PACX-1vQumVZq6E3N4z3gBose1SjKZ5Pj89o_oPMMsQb3phHicohd0iaGK3ntE7wCQ10pIIeW3ex9gdkhRR4o/pub?gid=0&single=true&output=csv";
+        "https://docs.google.com/spradsheets/d/e/2PACX-1vQumVZq6E3N4z3gBose1SjKZ5Pj89o_oPMMsQb3phHicohd0iaGK3ntE7wCQ10pIIeW3ex9gdkhRR4o/pub?gid=0&single=true&output=csv";
 
       let map;
       let markersLayer = L.layerGroup();
@@ -155,7 +155,7 @@
       osmLayer.addTo(map);
       markersLayer.addTo(map);
 
-      // --- Переключение слоёв ---
+  
       document.getElementById("streetsBtn").addEventListener("click", () => {
         map.removeLayer(satelliteLayer);
         map.addLayer(osmLayer);
@@ -169,7 +169,7 @@
         document.getElementById("streetsBtn").classList.remove("active");
       });
 
-      // --- Вспомогательные функции UI ---
+    
       function updateSelectAndButtons() {
         const select = document.getElementById("potholeSelect");
         select.innerHTML = '<option value="">-- Выберите яму --</option>';
@@ -234,7 +234,7 @@
         });
       }
 
-      // --- Загрузка данных из CSV (Google Sheets) ---
+  
       async function loadData() {
         const statusDiv = document.getElementById("status");
         statusDiv.textContent = "Загрузка данных...";
@@ -255,7 +255,7 @@
                 if (isNaN(lat) || isNaN(lon) || isNaN(impact)) continue;
                 newPotholes.push({ lat, lon, impact });
               }
-              // если есть поле Time – сортируем по времени
+              
               if (data[0] && data[0].Time) {
                 newPotholes.sort((a, b) => (a.time || 0) - (b.time || 0));
               }
